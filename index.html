@@ -650,31 +650,44 @@ function buildSchedule(){
       grp1=shuffled.slice(0,target1);
       grp2=shuffled.slice(target1);
     }
-    const rem1=grp1.length%2;
-    let bye1=null, active1=[...grp1];
-    if(rem1===1){
-      const s=[...grp1].sort((a,b)=>(playCount[a]-playCount[b])||((byeCount[a]||0)-(byeCount[b]||0))||(Math.random()-.5));
-      bye1=s[0]; active1=grp1.filter(id=>id!==bye1); byeCount[bye1]=(byeCount[bye1]||0)+1;
+    // Sélection équitable des équipes au repos : on retire autant d'équipes
+    // que nécessaire pour que le reste forme un nombre pair <= terrains*2,
+    // en priorisant celles qui ont le moins joué / le moins été au repos.
+    function pickRestAndActive(grp, maxCourts){
+      const maxMatches=Math.min(Math.floor(grp.length/2), maxCourts);
+      const numRest=grp.length - maxMatches*2;
+      let rest=[], active=[...grp];
+      if(numRest>0){
+        const sorted=[...grp].sort((a,b)=>
+          ((byeCount[a]||0)-(byeCount[b]||0)) ||
+          (playCount[b]-playCount[a]) ||
+          (Math.random()-.5)
+        );
+        rest=sorted.slice(0,numRest);
+        const restSet=new Set(rest);
+        active=grp.filter(id=>!restSet.has(id));
+        rest.forEach(id=>{ byeCount[id]=(byeCount[id]||0)+1; });
+      }
+      return {active, rest, maxMatches};
     }
-    const matches1=makeRoundMatches(active1,t1,oppCount);
+
+    const r1=pickRestAndActive(grp1,t1);
+    const matches1=makeRoundMatches(r1.active,r1.maxMatches,oppCount);
     matches1.forEach(m=>{ [m.tA,m.tB].forEach(id=>{ playCount[id]=(playCount[id]||0)+1; if(!oppCount[id]) oppCount[id]={}; const o=m.tA===id?m.tB:m.tA; oppCount[id][o]=(oppCount[id][o]||0)+1; }); });
     let hall2=null;
+    let restsAll=[...r1.rest];
     if(halls===2&&grp2.length>=2){
-      const rem2=grp2.length%2;
-      let bye2=null, active2=[...grp2];
-      if(rem2===1){
-        const s=[...grp2].sort((a,b)=>(playCount[a]-playCount[b])||((byeCount[a]||0)-(byeCount[b]||0))||(Math.random()-.5));
-        bye2=s[0]; active2=grp2.filter(id=>id!==bye2); byeCount[bye2]=(byeCount[bye2]||0)+1;
-      }
-      const matches2=makeRoundMatches(active2,t2,oppCount);
+      const r2=pickRestAndActive(grp2,t2);
+      const matches2=makeRoundMatches(r2.active,r2.maxMatches,oppCount);
       matches2.forEach(m=>{ [m.tA,m.tB].forEach(id=>{ playCount[id]=(playCount[id]||0)+1; if(!oppCount[id]) oppCount[id]={}; const o=m.tA===id?m.tB:m.tA; oppCount[id][o]=(oppCount[id][o]||0)+1; }); });
-      hall2={ matches:matches2, bye:bye2, label:'Salle 2', teams:grp2 };
+      hall2={ matches:matches2, byes:r2.rest, label:'Salle 2', teams:grp2 };
+      restsAll=[...restsAll, ...r2.rest];
     }
     schedule.push({
       roundTime:matchTime, session:wave.session, posInSession:wave.idx,
       waveLabel:`${isAM?'🌤️':'☀️'} Vague ${wave.idx+1}`,
-      hall1:{ matches:matches1, bye:bye1, label:halls===2?'Salle 1':'', teams:grp1 },
-      hall2, subs:[bye1,hall2?.bye].filter(Boolean)
+      hall1:{ matches:matches1, byes:r1.rest, label:halls===2?'Salle 1':'', teams:grp1 },
+      hall2, subs:restsAll
     });
   }
   ST.schedule=schedule; ST.results={}; ST.activeRound=0;
@@ -791,7 +804,7 @@ function renderFichesPanel(){
       const rd = ST.schedule[r];
       const halls = [rd.hall1, rd.hall2].filter(Boolean);
       for(const h of halls){
-        if(h.bye===t.id){ nextMatch={time:rd.roundTime, label:'🟡 Exempt', court:'—', opp:null}; break; }
+        if((h.byes||[]).includes(t.id)){ nextMatch={time:rd.roundTime, label:'🟡 Exempt', court:'—', opp:null}; break; }
         for(let mi=0;mi<h.matches.length;mi++){
           const m=h.matches[mi];
           if(m.tA===t.id||m.tB===t.id){
@@ -831,7 +844,7 @@ function renderTeamsSpecPage(){
     ST.schedule.forEach((rd,r)=>{
       const halls=[rd.hall1,rd.hall2].filter(Boolean);
       halls.forEach((h,hi)=>{
-        if(h.bye===t.id){ rows.push({type:'bye',time:rd.roundTime,wave:rd.waveLabel||('V'+(r+1)),session:rd.session}); return; }
+        if((h.byes||[]).includes(t.id)){ rows.push({type:'bye',time:rd.roundTime,wave:rd.waveLabel||('V'+(r+1)),session:rd.session}); return; }
         h.matches.forEach((m,mi)=>{
           if(m.tA===t.id||m.tB===t.id){
             const opp=m.tA===t.id?m.tB:m.tA;
@@ -1227,9 +1240,10 @@ function renderMatches(){
         </div>
       </div>`;
     }).join('');
-    const byeHtml = h.bye ? `<div class="info info-y" style="margin-top:8px">🟡 Exempte : <strong>${tName(h.bye)}</strong>${isScorer()?` <button onclick="printTeamScheduleSingle('${h.bye}')" style="background:none;border:1px solid var(--ylw);color:var(--ylw);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px;margin-left:8px">🖨 Fiche</button>`:''}` : '';
+    const byes=h.byes||[];
+    const byeHtml = byes.length ? `<div class="info info-y" style="margin-top:8px">🟡 Exempt${byes.length>1?'s':''} : ${byes.map(id=>`<strong>${tName(id)}</strong>${isScorer()?` <button onclick="printTeamScheduleSingle('${id}')" style="background:none;border:1px solid var(--ylw);color:var(--ylw);border-radius:5px;padding:2px 6px;cursor:pointer;font-size:10px;margin-left:4px">🖨</button>`:''}`).join(' · ')}</div>` : '';
     matchOffset += h.matches.length;
-    return (h.label?`<div class="wave-sep"><span class="wave-sep-lbl">🏟️ ${h.label}</span></div>`:'') + hallHtml + (h.bye?byeHtml+'</div>':'');
+    return (h.label?`<div class="wave-sep"><span class="wave-sep-lbl">🏟️ ${h.label}</span></div>`:'') + hallHtml + (byes.length?byeHtml+'</div>':'');
   }).join('');
 }
 
@@ -1254,11 +1268,13 @@ function computeStandings(){
       })
     );
     if(!roundHasScore) return;
-    if(rd.hall1.bye && stats[rd.hall1.bye]){
-      const s=stats[rd.hall1.bye]; s.byeTours++;s.pts+=2;s.d++;s.played++;
-    }
-    if(rd.hall2&&rd.hall2.bye&&stats[rd.hall2.bye]){
-      const s=stats[rd.hall2.bye]; s.byeTours++;s.pts+=2;s.d++;s.played++;
+    (rd.hall1.byes||[]).forEach(id=>{
+      const s=stats[id]; if(s){ s.byeTours++;s.pts+=2;s.d++;s.played++; }
+    });
+    if(rd.hall2){
+      (rd.hall2.byes||[]).forEach(id=>{
+        const s=stats[id]; if(s){ s.byeTours++;s.pts+=2;s.d++;s.played++; }
+      });
     }
   });
 
@@ -1699,7 +1715,7 @@ window.printTeamSchedule = function(tid){
     const halls=[rd.hall1,rd.hall2].filter(Boolean);
     const session=rd.session==='morning'?'☀️ Matin':'🌤️ AM';
     halls.forEach((h,hi)=>{
-      if(h.bye===tid){
+      if((h.byes||[]).includes(tid)){
         rows.push({r,time:rd.roundTime||'',session,waveLabel:rd.waveLabel||('Vague '+(r+1)),type:'bye',court:'—',opp:null});
       }
       h.matches.forEach((m,localMi)=>{
