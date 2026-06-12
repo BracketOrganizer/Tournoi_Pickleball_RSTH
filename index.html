@@ -589,6 +589,7 @@ function buildSchedule(){
   const allIds=ST.teams.slice(0,N).map(t=>t.id);
   const oppCount={}, playCount={}, byeCount={};
   allIds.forEach(id=>{ oppCount[id]={}; playCount[id]=0; byeCount[id]=0; });
+  const sessionHallAssign = {}; // salle fixe par session (morning/afternoon)
   const morningStart=cfg.start;
   const afternoonStart=cfg.lunchBreak
     ? addMinutes(cfg.lunchStart,cfg.lunchDuration||60)
@@ -604,17 +605,30 @@ function buildSchedule(){
     const t2    = cfg.t2    || wave.t2    || 8;
     const totalCourts = halls===2 ? t1+t2 : t1;
 
+    // ── AFFECTATION FIXE PAR SESSION ──────────────────────────
+    // Chaque équipe reste dans la même salle pour toute la session.
+    // On calcule l'affectation salle1/salle2 au début de chaque session
+    // et on la réutilise à chaque vague de cette session.
+    const sessionKey = wave.session; // 'morning' ou 'afternoon'
+    if(halls === 2){
+      if(!sessionHallAssign[sessionKey]){
+        // Première vague de cette session : affecter les équipes aux salles
+        // Salle 1 : cap1 = t1*2 équipes, salle 2 : le reste
+        // On trie par playCount pour équilibrer qui a joué le moins
+        const cap1 = t1 * 2;
+        const sorted = shuffle([...allIds]).sort((a,b)=>(playCount[a]||0)-(playCount[b]||0));
+        sessionHallAssign[sessionKey] = {
+          hall1: new Set(sorted.slice(0, cap1)),
+          hall2: new Set(sorted.slice(cap1))
+        };
+      }
+    }
+
     // ── SÉLECTION GLOBALE DES EXEMPTS ──────────────────────
-    // On calcule d'abord combien d'équipes jouent AU TOTAL cette vague,
-    // puis on choisit qui est exempt en regardant TOUTES les équipes ensemble.
-    // C'est la seule façon de garantir un écart max de 1 match entre équipes.
     const maxMatchesTotal = Math.min(Math.floor(N/2), totalCourts);
     const numPlaying = maxMatchesTotal * 2;
     const numRest = N - numPlaying;
 
-    // Trier globalement : au repos → ceux qui ont le plus joué (équilibrage)
-    // En cas d'égalité de matchs joués : ceux qui ont le moins été exemptés
-    // En cas d'égalité parfaite : aléatoire
     const sortedAll = shuffle([...allIds]).sort((a,b)=>
       (playCount[b]-playCount[a]) ||
       ((byeCount[a]||0)-(byeCount[b]||0))
@@ -624,20 +638,33 @@ function buildSchedule(){
     restIds.forEach(id=>{ byeCount[id]=(byeCount[id]||0)+1; });
     const activeIds = allIds.filter(id=>!restSet.has(id));
 
-    // ── DISTRIBUTION DES ACTIFS ENTRE SALLES ───────────────
-    // On mélange les actifs (déjà équilibrés par playCount) puis on remplit
-    // la salle 1 jusqu'à sa capacité, le reste va en salle 2.
+    // ── DISTRIBUTION DES ACTIFS SELON AFFECTATION DE SESSION ──
     let playing1=[], playing2=[], byes1=[], byes2=[];
     if(halls===1){
       playing1 = shuffle([...activeIds]);
       byes1 = restIds;
     } else {
+      const assign = sessionHallAssign[sessionKey];
+      // Respecter l'affectation de salle, parmi les actifs seulement
+      playing1 = activeIds.filter(id=>assign.hall1.has(id));
+      playing2 = activeIds.filter(id=>assign.hall2.has(id));
+      // Si déséquilibre (exempts viennent d'une salle), rééquilibrer
       const cap1 = t1 * 2;
-      // Mélanger les actifs pour varier les rencontres inter-salles
-      const shuffledActive = shuffle([...activeIds]);
-      playing1 = shuffledActive.slice(0, cap1);
-      playing2 = shuffledActive.slice(cap1);
-      // Distribuer les exempts entre les salles pour l'affichage
+      const cap2 = t2 * 2;
+      // S'assurer que chaque salle a un nombre pair d'actifs <= capacité
+      while(playing1.length > cap1 && playing2.length < cap2){
+        playing2.push(playing1.pop());
+      }
+      while(playing2.length > cap2 && playing1.length < cap1){
+        playing1.push(playing2.pop());
+      }
+      // Ajuster si impair
+      if(playing1.length % 2 !== 0 && playing2.length > 0){
+        playing2.push(playing1.pop());
+      }
+      if(playing2.length % 2 !== 0 && playing1.length > 0){
+        playing1.push(playing2.pop());
+      }
       byes1 = restIds.slice(0, Math.ceil(restIds.length/2));
       byes2 = restIds.slice(Math.ceil(restIds.length/2));
     }
@@ -703,7 +730,7 @@ function renderGen(){
       <div class="round-hdr">
         <span class="round-hdr-ttl">${rd.waveLabel||'🎯 Vague '+(ri+1)}</span>
         <span class="round-time-badge">🕐 ${rd.roundTime}</span>
-        ${rd.subs.length?`<span class="sub-badge">🟡 Exempt: ${rd.subs.map(id=>tName(id)).join(', ')}</span>`:'<span style="font-size:11px;color:var(--grn);font-weight:700">✅ Tous jouent</span>'}
+        ${rd.subs&&rd.subs.length?`<span class="sub-badge" style="background:var(--ylw-bg);color:var(--ylw);border:1px solid rgba(184,114,10,.3);padding:2px 8px;border-radius:10px;font-size:10px;font-weight:700">⏸ Au repos : ${rd.subs.map(id=>tName(id)).join(' · ')}</span>`:'<span style="font-size:11px;color:var(--grn);font-weight:700">✅ Tous jouent</span>'}
         <span style="font-size:11px;color:var(--muted);margin-left:auto">${halls.reduce((s,h)=>s+h.matches.length,0)} matchs</span>
       </div>
       ${halls.map(h=>`<div class="wave-block">
@@ -714,7 +741,6 @@ function renderGen(){
           <span class="rp-vs">VS</span>
           <span class="rp-pair"><strong>${tName(m.tB)}</strong> <span style="font-size:10px;color:var(--muted)">${tClub(m.tB)}</span></span>
         </div>`).join('')}
-        ${h.bye?`<div class="info info-y" style="padding:6px 12px;margin-top:6px;font-size:12px">🟡 Exempte : <strong>${tName(h.bye)}</strong></div>`:''}
       </div>`).join('')}
     </div>`;
   }
@@ -1184,8 +1210,10 @@ function getGlobalMatchIdx(r, hall, localMi){
 
 function renderSubInfo(){
   const rd=ST.schedule[ST.activeRound]; const el=document.getElementById('subRoundInfo'); if(!el) return;
-  if(!rd||!rd.subs.length){ el.innerHTML=''; return; }
-  el.innerHTML=`<div class="info info-y">🟡 <strong>Exempte${rd.subs.length>1?'s':''} ce tour :</strong> ${rd.subs.map(id=>tName(id)).join(' · ')}</div>`;
+  if(!rd||!rd.subs||!rd.subs.length){ el.innerHTML=''; return; }
+  // Afficher uniquement les équipes remplaçantes (au repos cette vague)
+  // sans le mot "Exempte" — juste "Au repos"
+  el.innerHTML=`<div class="info info-y" style="font-size:12px">⏸ <strong>Au repos cette vague :</strong> ${rd.subs.map(id=>`<span style="font-weight:700">${tName(id)}</span>`).join(' · ')} <span style="color:var(--muted);font-size:11px">(+2 pts · 0–0)</span></div>`;
 }
 
 function renderMatches(){
@@ -1259,7 +1287,8 @@ function computeStandings(){
       pts:0,w:0,d:0,l:0,gf:0,ga:0,played:0,byeTours:0,h2h:{}};
   });
 
-  // Compensation bye (exemptions)
+  // Compensation remplaçants (équipes au repos cette vague)
+  // Seules les équipes dans rd.subs reçoivent 2 pts et 0-0
   ST.schedule.forEach((rd,r)=>{
     const roundHasScore=[rd.hall1,rd.hall2].filter(Boolean).some((h,hi)=>
       h.matches.some((_,mi)=>{
@@ -1268,14 +1297,9 @@ function computeStandings(){
       })
     );
     if(!roundHasScore) return;
-    (rd.hall1.byes||[]).forEach(id=>{
+    (rd.subs||[]).forEach(id=>{
       const s=stats[id]; if(s){ s.byeTours++;s.pts+=2;s.d++;s.played++; }
     });
-    if(rd.hall2){
-      (rd.hall2.byes||[]).forEach(id=>{
-        const s=stats[id]; if(s){ s.byeTours++;s.pts+=2;s.d++;s.played++; }
-      });
-    }
   });
 
   // Matchs
