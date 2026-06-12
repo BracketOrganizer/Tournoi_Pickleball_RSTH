@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -413,38 +412,45 @@ window.toggleRules = function(){
 };
 
 // ══════════════════════════════════════════════════════════
-// PAGE 1 — CONFIG — modèle simple : équipes + matchs souhaités + terrains
+// PAGE 1 — CONFIG — vague unique, nb vagues auto
 // ══════════════════════════════════════════════════════════
 
-function getCfg(){
-  const n       = +document.getElementById('cfg_n').value || 16;
-  const halls   = +(document.getElementById('cfg_halls')?.value||1);
-  const t1      = +(document.getElementById('cfg_t1')?.value||8);
-  const t2      = +(document.getElementById('cfg_t2')?.value||0);
+// Calcule le nb de vagues auto selon N équipes, terrains et matchs cibles par équipe
+function _calcAutoWaves(n, t1, t2, halls, targetMatches){
   const totalCourts = halls===2 ? t1+t2 : t1;
-  const targetMPT   = +(document.getElementById('cfg_matches_per_team')?.value||5);
-
-  // Matchs joués par vague = min(terrains, floor(N/2))
-  // Si N est impair, 1 équipe sera exemptée par vague (au maximum)
   const matchesPerWave = Math.min(totalCourts, Math.floor(n/2));
-  // Vagues nécessaires = ceil(N * cible / (matchesPerWave * 2))
-  const totalWaves = matchesPerWave > 0
-    ? Math.max(1, Math.ceil(n * targetMPT / (matchesPerWave * 2)))
-    : 1;
-
-  // Répartition matin/après-midi : 60% matin, 40% après-midi
+  if(matchesPerWave===0) return {morning:1, afternoon:1, matchesPerWave:0, totalWaves:2};
+  const target = Math.max(1, targetMatches||5);
+  const totalWaves = Math.min(20, Math.max(2, Math.ceil(n * target / (matchesPerWave * 2))));
   const morning   = Math.max(1, Math.round(totalWaves * 0.6));
   const afternoon = Math.max(1, totalWaves - morning);
+  return { morning, afternoon, matchesPerWave, totalWaves };
+}
 
-  // Construire le tableau waves
+function getCfg(){
+  const n       = +document.getElementById('cfg_n').value || 32;
+  const halls   = +(document.getElementById('cfg_halls')?.value||1);
+  const t1      = +(document.getElementById('cfg_t1')?.value||8);
+  const t2      = +(document.getElementById('cfg_t2')?.value||8);
+  const wMode   = document.getElementById('cfg_wave_mode')?.value || 'auto';
+  const targetMatchesPerTeam = +(document.getElementById('cfg_matches_per_team')?.value||5);
+  let morning, afternoon;
+  if(wMode==='manual'){
+    morning   = +(document.getElementById('cfg_morning')?.value||3);
+    afternoon = +(document.getElementById('cfg_afternoon')?.value||4);
+  } else {
+    const auto = _calcAutoWaves(n, t1, t2, halls, targetMatchesPerTeam);
+    morning   = auto.morning;
+    afternoon = auto.afternoon;
+  }
+  // Construire le tableau waves — même config pour toutes les vagues
   const waves = [];
   ['morning','afternoon'].forEach(sess=>{
     const count = sess==='morning' ? morning : afternoon;
     for(let i=0;i<count;i++){
-      waves.push({ session:sess, idx:i, halls, t1, t2 });
+      waves.push({ session:sess, idx:i, halls, t1, t2, teams1:0, teams2:0 });
     }
   });
-
   return {
     n,
     mt:             +(document.getElementById('cfg_mt')?.value||15),
@@ -457,7 +463,7 @@ function getCfg(){
     matchesMorning:   morning,
     matchesAfternoon: afternoon,
     halls, t1, t2,
-    targetMatchesPerTeam: targetMPT,
+    targetMatchesPerTeam: targetMatchesPerTeam,
     waves,
     t: t1,
   };
@@ -467,7 +473,7 @@ function syncCfgForm(){
   const c = ST.cfg;
   const setV=(id,v)=>{ const el=document.getElementById(id); if(el) el.value=v; };
   const setC=(id,v)=>{ const el=document.getElementById(id); if(el) el.checked=v; };
-  setV('cfg_n', c.n||16);
+  setV('cfg_n', c.n);
   setV('cfg_mt', c.mt||15);
   setV('cfg_tt', c.tt||3);
   setV('cfg_lunchdur', c.lunchDuration||60);
@@ -475,14 +481,25 @@ function syncCfgForm(){
   setV('cfg_lunchstart', c.lunchStart||'12:30');
   setV('cfg_bal', c.bal||'level');
   setC('cfg_lunch', c.lunchBreak!==false);
+  // Terrains depuis la première vague ou depuis c.t1
   const firstWave = Array.isArray(c.waves) ? c.waves[0] : null;
-  const halls = c.halls || firstWave?.halls || 1;
-  const t1    = c.t1    || firstWave?.t1    || 8;
-  const t2    = c.t2    || firstWave?.t2    || 0;
+  const halls  = c.halls  || firstWave?.halls  || 1;
+  const t1     = c.t1     || firstWave?.t1     || 8;
+  const t2     = c.t2     || firstWave?.t2     || 8;
   setV('cfg_halls', halls);
   setV('cfg_t1', t1);
   setV('cfg_t2', t2);
   setV('cfg_matches_per_team', c.targetMatchesPerTeam||5);
+  // Mode manuel si cfg a des vagues avec des comptes différents
+  const hasMorning   = c.matchesMorning   != null;
+  const hasAfternoon = c.matchesAfternoon != null;
+  const auto = _calcAutoWaves(c.n||32, t1, t2, halls, c.targetMatchesPerTeam||5);
+  const isAuto = !hasMorning || (c.matchesMorning===auto.morning && c.matchesAfternoon===auto.afternoon);
+  setV('cfg_wave_mode', isAuto ? 'auto' : 'manual');
+  if(!isAuto){
+    setV('cfg_morning',   c.matchesMorning||3);
+    setV('cfg_afternoon', c.matchesAfternoon||4);
+  }
   onCfgChange();
 }
 
@@ -494,52 +511,73 @@ window.saveCfgAndNext = async function(){
 };
 
 window.onCfgChange = function(){
+  // Afficher/masquer terrains salle 2
   const halls   = +(document.getElementById('cfg_halls')?.value||1);
   const t2row   = document.getElementById('cfg_t2_row');
   if(t2row) t2row.style.display = halls===2 ? '' : 'none';
 
+  // Afficher/masquer inputs vagues manuels
+  const wMode   = document.getElementById('cfg_wave_mode')?.value || 'auto';
+  const mRow    = document.getElementById('cfg_morning_row');
+  const aRow    = document.getElementById('cfg_afternoon_row');
+  if(mRow) mRow.style.display = wMode==='manual' ? '' : 'none';
+  if(aRow) aRow.style.display = wMode==='manual' ? '' : 'none';
+
+  // Déjeuner
   const lunchCk  = document.getElementById('cfg_lunch')?.checked;
   const lunchRow = document.getElementById('lunchRow');
   if(lunchRow) lunchRow.style.display = lunchCk ? '' : 'none';
 
-  const n          = +(document.getElementById('cfg_n')?.value||16);
-  const t1         = +(document.getElementById('cfg_t1')?.value||8);
-  const t2         = +(document.getElementById('cfg_t2')?.value||0);
-  const totalCourts= halls===2 ? t1+t2 : t1;
-  const targetMPT  = +(document.getElementById('cfg_matches_per_team')?.value||5);
-  const mt         = +(document.getElementById('cfg_mt')?.value||15);
-  const tt         = +(document.getElementById('cfg_tt')?.value||3);
-  const start      = document.getElementById('cfg_start')?.value||'09:00';
-  const lunchStart = document.getElementById('cfg_lunchstart')?.value||'12:30';
-  const lunchDur   = +(document.getElementById('cfg_lunchdur')?.value||60);
-
-  const matchesPerWave = Math.min(totalCourts, Math.floor(n/2));
-  const exemptPerWave  = n - matchesPerWave*2; // 0 ou 1
-  const totalWaves     = matchesPerWave > 0
-    ? Math.max(1, Math.ceil(n * targetMPT / (matchesPerWave * 2)))
-    : 1;
-  const morning   = Math.max(1, Math.round(totalWaves * 0.6));
-  const afternoon = Math.max(1, totalWaves - morning);
-
-  // Horaires
-  const morningEnd   = addMinutes(start, morning*(mt+tt)-tt);
-  const afterStart   = lunchCk ? addMinutes(lunchStart, lunchDur) : morningEnd;
-  const afterEnd     = addMinutes(afterStart, afternoon*(mt+tt)-tt);
-
-  // Info
-  const infoEl = document.getElementById('wave_auto_info');
-  if(infoEl){
-    const exemptTxt = exemptPerWave===0
-      ? '✅ Toutes les équipes jouent à chaque vague'
-      : `⚠️ 1 équipe exemptée par vague (N impair ou terrains insuffisants) — rotation équitable, +2 pts de compensation`;
-    infoEl.className = exemptPerWave===0 ? 'info info-g' : 'info info-y';
-    infoEl.innerHTML = `<strong>${n} équipes</strong> · <strong>${totalCourts} terrains</strong> · <strong>${matchesPerWave} matchs/vague</strong> · <strong>${totalWaves} vagues</strong> (${morning} matin + ${afternoon} AM)<br>${exemptTxt}`;
+  // Calcul vagues
+  const n  = +(document.getElementById('cfg_n')?.value||32);
+  const t1 = +(document.getElementById('cfg_t1')?.value||8);
+  const t2 = +(document.getElementById('cfg_t2')?.value||8);
+  const targetMPT = +(document.getElementById('cfg_matches_per_team')?.value||5);
+  let morning, afternoon;
+  if(wMode==='manual'){
+    morning   = +(document.getElementById('cfg_morning')?.value||3);
+    afternoon = +(document.getElementById('cfg_afternoon')?.value||4);
+  } else {
+    const auto = _calcAutoWaves(n, t1, t2, halls, targetMPT);
+    morning   = auto.morning;
+    afternoon = auto.afternoon;
+    const em = document.getElementById('cfg_morning');
+    const ea = document.getElementById('cfg_afternoon');
+    if(em) em.value = morning;
+    if(ea) ea.value = afternoon;
   }
 
+  // Afficher/masquer input matchs/équipe (uniquement en mode auto)
+  const mptRow = document.getElementById('cfg_mpt_row');
+  if(mptRow) mptRow.style.display = wMode==='auto' ? '' : 'none';
+
+  // Info auto
+  const infoEl = document.getElementById('wave_auto_info');
+  if(infoEl){
+    const totalCourts = halls===2 ? t1+t2 : t1;
+    const matchesPerWave = Math.min(totalCourts, Math.floor(n/2));
+    const totalWaves = morning + afternoon;
+    infoEl.style.display = '';
+    infoEl.innerHTML = wMode==='auto'
+      ? `🤖 <strong>${totalWaves} vagues calculées</strong> (${morning} matin + ${afternoon} après-midi) · ${halls===2?`${t1}+${t2}=<strong>${totalCourts} terrains</strong>`:`<strong>${t1} terrains</strong>`} · <strong>${matchesPerWave} matchs/vague</strong> · cible <strong>${targetMPT} matchs/équipe</strong>`
+      : `✏️ Mode manuel : <strong>${morning} vagues matin</strong> + <strong>${afternoon} vagues après-midi</strong> = ${morning+afternoon} vagues`;
+  }
+
+  // Preview horaires
+  const mt        = +(document.getElementById('cfg_mt')?.value||15);
+  const tt        = +(document.getElementById('cfg_tt')?.value||3);
+  const start     = document.getElementById('cfg_start')?.value||'09:00';
+  const lunchStart= document.getElementById('cfg_lunchstart')?.value||'12:30';
+  const lunchDur  = +(document.getElementById('cfg_lunchdur')?.value||60);
+  const morningEnd  = addMinutes(start,  morning*(mt+tt)-tt);
+  const afterStart  = lunchCk ? addMinutes(lunchStart,lunchDur) : morningEnd;
+  const afterEnd    = addMinutes(afterStart, afternoon*(mt+tt)-tt);
   const el = document.getElementById('cfgPreview');
   if(el){
     el.className='info info-g';
-    el.innerHTML=`☀️ ${start} → ${morningEnd}${lunchCk?` · 🍽️ ${lunchStart} (${lunchDur} min)`:''}<br>🌤️ ${afterStart} → ${afterEnd} · ⏱ match ${mt} min · transition ${tt} min`;
+    el.innerHTML=`<strong>${n} équipes</strong> · <strong>${morning+afternoon} vagues</strong> (${morning} matin + ${afternoon} AM)<br>
+    ☀️ ${start} → ${morningEnd}${lunchCk?` · 🍽️ ${lunchStart} (${lunchDur} min)`:''}<br>
+    🌤️ ${afterStart} → ${afterEnd} · ⏱ match ${mt} min · transition ${tt} min`;
   }
 };
 
@@ -603,60 +641,53 @@ function buildSchedule(){
     const halls = cfg.halls || wave.halls || 1;
     const t1    = cfg.t1    || wave.t1    || 8;
     const t2    = cfg.t2    || wave.t2    || 8;
-    const totalCourts = halls===2 ? t1+t2 : t1;
-
-    // ── SÉLECTION GLOBALE DES EXEMPTS ──────────────────────
-    // On calcule d'abord combien d'équipes jouent AU TOTAL cette vague,
-    // puis on choisit qui est exempt en regardant TOUTES les équipes ensemble.
-    // C'est la seule façon de garantir un écart max de 1 match entre équipes.
-    const maxMatchesTotal = Math.min(Math.floor(N/2), totalCourts);
-    const numPlaying = maxMatchesTotal * 2;
-    const numRest = N - numPlaying;
-
-    // Trier globalement : au repos → ceux qui ont le plus joué (équilibrage)
-    // En cas d'égalité de matchs joués : ceux qui ont le moins été exemptés
-    // En cas d'égalité parfaite : aléatoire
-    const sortedAll = shuffle([...allIds]).sort((a,b)=>
-      (playCount[b]-playCount[a]) ||
-      ((byeCount[a]||0)-(byeCount[b]||0))
-    );
-    const restIds = sortedAll.slice(0, numRest);
-    const restSet = new Set(restIds);
-    restIds.forEach(id=>{ byeCount[id]=(byeCount[id]||0)+1; });
-    const activeIds = allIds.filter(id=>!restSet.has(id));
-
-    // ── DISTRIBUTION DES ACTIFS ENTRE SALLES ───────────────
-    // On mélange les actifs (déjà équilibrés par playCount) puis on remplit
-    // la salle 1 jusqu'à sa capacité, le reste va en salle 2.
-    let playing1=[], playing2=[], byes1=[], byes2=[];
+    let grp1=[], grp2=[];
     if(halls===1){
-      playing1 = shuffle([...activeIds]);
-      byes1 = restIds;
+      grp1=[...allIds]; grp2=[];
     } else {
-      const cap1 = t1 * 2;
-      // Mélanger les actifs pour varier les rencontres inter-salles
-      const shuffledActive = shuffle([...activeIds]);
-      playing1 = shuffledActive.slice(0, cap1);
-      playing2 = shuffledActive.slice(cap1);
-      // Distribuer les exempts entre les salles pour l'affichage
-      byes1 = restIds.slice(0, Math.ceil(restIds.length/2));
-      byes2 = restIds.slice(Math.ceil(restIds.length/2));
+      const target1=Math.ceil(N/2);
+      const shuffled=shuffle(allIds);
+      grp1=shuffled.slice(0,target1);
+      grp2=shuffled.slice(target1);
+    }
+    // Sélection équitable des équipes au repos : on retire autant d'équipes
+    // que nécessaire pour que le reste forme un nombre pair <= terrains*2,
+    // en priorisant celles qui ont le moins joué / le moins été au repos.
+    function pickRestAndActive(grp, maxCourts){
+      const maxMatches=Math.min(Math.floor(grp.length/2), maxCourts);
+      const numRest=grp.length - maxMatches*2;
+      let rest=[], active=[...grp];
+      if(numRest>0){
+        const sorted=[...grp].sort((a,b)=>
+          ((byeCount[a]||0)-(byeCount[b]||0)) ||
+          (playCount[b]-playCount[a]) ||
+          (Math.random()-.5)
+        );
+        rest=sorted.slice(0,numRest);
+        const restSet=new Set(rest);
+        active=grp.filter(id=>!restSet.has(id));
+        rest.forEach(id=>{ byeCount[id]=(byeCount[id]||0)+1; });
+      }
+      return {active, rest, maxMatches};
     }
 
-    const matches1 = makeRoundMatches(playing1, t1, oppCount);
+    const r1=pickRestAndActive(grp1,t1);
+    const matches1=makeRoundMatches(r1.active,r1.maxMatches,oppCount);
     matches1.forEach(m=>{ [m.tA,m.tB].forEach(id=>{ playCount[id]=(playCount[id]||0)+1; if(!oppCount[id]) oppCount[id]={}; const o=m.tA===id?m.tB:m.tA; oppCount[id][o]=(oppCount[id][o]||0)+1; }); });
-
     let hall2=null;
-    if(halls===2 && playing2.length>=2){
-      const matches2 = makeRoundMatches(playing2, t2, oppCount);
+    let restsAll=[...r1.rest];
+    if(halls===2&&grp2.length>=2){
+      const r2=pickRestAndActive(grp2,t2);
+      const matches2=makeRoundMatches(r2.active,r2.maxMatches,oppCount);
       matches2.forEach(m=>{ [m.tA,m.tB].forEach(id=>{ playCount[id]=(playCount[id]||0)+1; if(!oppCount[id]) oppCount[id]={}; const o=m.tA===id?m.tB:m.tA; oppCount[id][o]=(oppCount[id][o]||0)+1; }); });
-      hall2={ matches:matches2, byes:byes2, label:'Salle 2', teams:playing2 };
+      hall2={ matches:matches2, byes:r2.rest, label:'Salle 2', teams:grp2 };
+      restsAll=[...restsAll, ...r2.rest];
     }
     schedule.push({
       roundTime:matchTime, session:wave.session, posInSession:wave.idx,
       waveLabel:`${isAM?'🌤️':'☀️'} Vague ${wave.idx+1}`,
-      hall1:{ matches:matches1, byes:byes1, label:halls===2?'Salle 1':'', teams:playing1 },
-      hall2, subs:restIds
+      hall1:{ matches:matches1, byes:r1.rest, label:halls===2?'Salle 1':'', teams:grp1 },
+      hall2, subs:restsAll
     });
   }
   ST.schedule=schedule; ST.results={}; ST.activeRound=0;
@@ -767,90 +798,35 @@ function renderFichesPanel(){
   if(!ST.schedule.length){ el.innerHTML='<div class="info info-y">Planning non encore généré.</div>'; return; }
   const teams = ST.teams.slice(0, ST.cfg?.n||ST.teams.length);
   el.innerHTML = teams.map(t=>{
-    return `<div class="fiche-team-row" id="ficherow_${t.id}" onclick="toggleFicheDetail('${t.id}')">
-      <span style="font-weight:700;font-family:'Oswald',sans-serif;font-size:14px;color:var(--ink)">${t.name}</span>
-      ${t.club&&t.club!=='—'?`<span class="t-club-badge">${t.club}</span>`:''}
-      <span class="fiche-chevron" id="fichechev_${t.id}" style="margin-left:auto;color:var(--muted);font-size:12px">▶</span>
-    </div>
-    <div id="fichedetail_${t.id}" style="display:none;background:var(--s2);border:1px solid var(--bdr);border-top:none;border-radius:0 0 8px 8px;padding:10px 12px;margin-bottom:2px">
-      ${buildTeamScheduleHtml(t)}
+    // Trouver le prochain match de cette équipe
+    let nextMatch = null;
+    for(let r=ST.activeRound; r<ST.schedule.length; r++){
+      const rd = ST.schedule[r];
+      const halls = [rd.hall1, rd.hall2].filter(Boolean);
+      for(const h of halls){
+        if((h.byes||[]).includes(t.id)){ nextMatch={time:rd.roundTime, label:'🟡 Exempt', court:'—', opp:null}; break; }
+        for(let mi=0;mi<h.matches.length;mi++){
+          const m=h.matches[mi];
+          if(m.tA===t.id||m.tB===t.id){
+            const opp=m.tA===t.id?m.tB:m.tA;
+            nextMatch={time:rd.roundTime, label:`T${mi+1}${h.label?' '+h.label:''}`, court:`T${mi+1}`, opp};
+            break;
+          }
+        }
+        if(nextMatch) break;
+      }
+      if(nextMatch) break;
+    }
+    const nextHtml = nextMatch
+      ? `<div style="font-size:11px;color:var(--blu);margin-top:4px">🕐 ${nextMatch.time} · ${nextMatch.label}${nextMatch.opp?' vs <strong>'+tName(nextMatch.opp)+'</strong>':''}</div>`
+      : `<div style="font-size:11px;color:var(--grn);margin-top:4px">✅ Tous matchs joués</div>`;
+    return `<div style="background:var(--s2);border:1px solid var(--bdr);border-radius:8px;padding:10px 12px;cursor:pointer" onclick="printTeamScheduleSingle('${t.id}')">
+      <div style="font-weight:700;font-family:'Oswald',sans-serif;font-size:14px;color:var(--ink)">${t.name}</div>
+      <div style="font-size:11px;color:var(--muted)">${t.p1} · ${t.p2}</div>
+      ${nextHtml}
+      <div style="font-size:10px;color:var(--dim);margin-top:4px">🖨 Cliquer pour imprimer la fiche</div>
     </div>`;
   }).join('');
-}
-
-window.toggleFicheDetail = function(id){
-  const detail = document.getElementById('fichedetail_'+id);
-  const row    = document.getElementById('ficherow_'+id);
-  const chev   = document.getElementById('fichechev_'+id);
-  if(!detail) return;
-  const isOpen = detail.style.display !== 'none';
-  // Close all others
-  ST.teams.forEach(t=>{
-    const d = document.getElementById('fichedetail_'+t.id);
-    const r = document.getElementById('ficherow_'+t.id);
-    const c = document.getElementById('fichechev_'+t.id);
-    if(d && t.id !== id){ d.style.display='none'; if(r) r.style.borderRadius='8px'; if(c) c.textContent='▶'; }
-  });
-  if(isOpen){
-    detail.style.display='none';
-    row.style.borderRadius='8px';
-    chev.textContent='▶';
-  } else {
-    detail.style.display='block';
-    row.style.borderRadius='8px 8px 0 0';
-    chev.textContent='▼';
-  }
-};
-
-function buildTeamScheduleHtml(t){
-  const rows = [];
-  ST.schedule.forEach((rd,r)=>{
-    const halls=[rd.hall1,rd.hall2].filter(Boolean);
-    halls.forEach((h,hi)=>{
-      if((h.byes||[]).includes(t.id)){ rows.push({type:'bye',time:rd.roundTime,wave:rd.waveLabel||('V'+(r+1)),session:rd.session}); return; }
-      h.matches.forEach((m,mi)=>{
-        if(m.tA===t.id||m.tB===t.id){
-          const opp=m.tA===t.id?m.tB:m.tA;
-          const gmi=getGlobalMatchIdxFromHallIdx(r,hi,mi);
-          const res=getRes(r,gmi);
-          const isA=m.tA===t.id;
-          const myS=isA?res.ga:res.gb, oppS=isA?res.gb:res.ga;
-          const done=myS!==''&&oppS!=='';
-          let result='',color='var(--muted)';
-          if(done){ const ms=+myS,os=+oppS;
-            if(ms>os){result='✅';color='var(--grn)';}
-            else if(ms<os){result='❌';color='var(--red)';}
-            else{result='🟡';color='var(--ylw)';}
-          }
-          rows.push({type:'match',time:rd.roundTime,wave:rd.waveLabel||('V'+(r+1)),session:rd.session,
-            court:`T${mi+1}${h.label?' '+h.label:''}`,opp,myS,oppS,done,result,color});
-        }
-      });
-    });
-  });
-  if(!rows.length) return '<div style="color:var(--muted);font-size:11px">Aucun match programmé.</div>';
-  const rowsHtml = rows.map(row=>{
-    if(row.type==='bye') return `<tr style="background:var(--ylw-bg)"><td style="color:var(--muted);font-size:10px">${row.wave}</td><td style="font-weight:700">${row.time}</td><td colspan="3" style="color:var(--ylw);font-size:11px">🟡 Exempt</td></tr>`;
-    const oppObj=tObj(row.opp);
-    return `<tr>
-      <td style="color:var(--muted);font-size:10px">${row.wave}</td>
-      <td style="font-weight:700;color:var(--blu)">${row.time}</td>
-      <td style="color:var(--dim);font-size:11px">${row.court}</td>
-      <td style="font-size:11px"><strong>${oppObj?oppObj.name:row.opp}</strong></td>
-      <td style="text-align:center;color:${row.color};font-size:12px">${row.done?`<strong>${row.myS}–${row.oppS}</strong> ${row.result}`:'<span style="color:var(--dim)">–</span>'}</td>
-    </tr>`;
-  }).join('');
-  return `<table style="width:100%;border-collapse:collapse;font-size:11px">
-    <thead><tr style="border-bottom:1px solid var(--bdr)">
-      <th style="text-align:left;padding:2px 4px;color:var(--dim);font-size:9px;font-weight:700">Vague</th>
-      <th style="text-align:left;padding:2px 4px;color:var(--dim);font-size:9px;font-weight:700">Heure</th>
-      <th style="text-align:left;padding:2px 4px;color:var(--dim);font-size:9px;font-weight:700">Terrain</th>
-      <th style="text-align:left;padding:2px 4px;color:var(--dim);font-size:9px;font-weight:700">Adversaire</th>
-      <th style="text-align:center;padding:2px 4px;color:var(--dim);font-size:9px;font-weight:700">Score</th>
-    </tr></thead>
-    <tbody>${rowsHtml}</tbody>
-  </table>
-  <div style="font-size:10px;color:var(--dim);margin-top:8px;text-align:right"><button onclick="printTeamScheduleSingle('${t.id}');event.stopPropagation()" style="background:none;border:1px solid var(--bdr);color:var(--dim);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:10px">🖨 Imprimer</button></div>`;
 }
 
 // ══════════════════════════════════════════════════════════
@@ -863,39 +839,62 @@ function renderTeamsSpecPage(){
   const teams = ST.teams.slice(0, limit);
   _ensureRoundTimes();
   el.innerHTML = teams.map(t=>{
-    return `<div class="fiche-team-row" id="specrow_${t.id}" onclick="toggleSpecDetail('${t.id}')">
-      <span style="font-weight:700;font-family:'Oswald',sans-serif;font-size:14px;color:var(--ink)">${t.name}</span>
-      ${t.club&&t.club!=='—'?`<span class="t-club-badge">${t.club}</span>`:''}
-      <span id="specchev_${t.id}" style="margin-left:auto;color:var(--muted);font-size:12px">▶</span>
-    </div>
-    <div id="specdetail_${t.id}" style="display:none;background:var(--s2);border:1px solid var(--bdr);border-top:none;border-radius:0 0 8px 8px;padding:10px 12px;margin-bottom:2px">
-      ${ST.schedule.length ? buildTeamScheduleHtml(t) : '<div style="color:var(--muted);font-size:11px">Planning non encore généré.</div>'}
+    // Programme complet de l'équipe
+    const rows = [];
+    ST.schedule.forEach((rd,r)=>{
+      const halls=[rd.hall1,rd.hall2].filter(Boolean);
+      halls.forEach((h,hi)=>{
+        if((h.byes||[]).includes(t.id)){ rows.push({type:'bye',time:rd.roundTime,wave:rd.waveLabel||('V'+(r+1)),session:rd.session}); return; }
+        h.matches.forEach((m,mi)=>{
+          if(m.tA===t.id||m.tB===t.id){
+            const opp=m.tA===t.id?m.tB:m.tA;
+            const gmi=getGlobalMatchIdxFromHallIdx(r,hi,mi);
+            const res=getRes(r,gmi);
+            const isA=m.tA===t.id;
+            const myS=isA?res.ga:res.gb, oppS=isA?res.gb:res.ga;
+            const done=myS!==''&&oppS!=='';
+            let result='',color='var(--muted)';
+            if(done){ const ms=+myS,os=+oppS;
+              if(ms>os){result='✅';color='var(--grn)';}
+              else if(ms<os){result='❌';color='var(--red)';}
+              else{result='🟡';color='var(--ylw)';}
+            }
+            rows.push({type:'match',time:rd.roundTime,wave:rd.waveLabel||('V'+(r+1)),session:rd.session,
+              court:`T${mi+1}${h.label?' '+h.label:''}`,opp,myS,oppS,done,result,color});
+          }
+        });
+      });
+    });
+    const rowsHtml = rows.map(row=>{
+      if(row.type==='bye') return `<tr style="background:var(--ylw-bg)"><td style="color:var(--muted);font-size:10px">${row.wave}</td><td style="font-weight:700">${row.time}</td><td colspan="3" style="color:var(--ylw);font-size:11px">🟡 Exempt</td></tr>`;
+      const oppObj=tObj(row.opp);
+      return `<tr>
+        <td style="color:var(--muted);font-size:10px">${row.wave}</td>
+        <td style="font-weight:700;color:var(--blu)">${row.time}</td>
+        <td style="color:var(--dim);font-size:11px">${row.court}</td>
+        <td style="font-size:11px"><strong>${oppObj?oppObj.name:row.opp}</strong>${oppObj&&oppObj.club&&oppObj.club!=='—'?`<br><span style='font-size:9px;color:var(--muted)'>${oppObj.club}</span>`:''}</td>
+        <td style="text-align:center;color:${row.color};font-size:12px">${row.done?`<strong>${row.myS}–${row.oppS}</strong> ${row.result}`:'<span style="color:var(--dim)">–</span>'}</td>
+      </tr>`;
+    }).join('');
+    return `<div style="background:var(--s1);border:1px solid var(--bdr);border-radius:10px;padding:12px;cursor:pointer" onclick="printTeamScheduleSingle('${t.id}')">
+      <div style="font-family:'Oswald',sans-serif;font-size:16px;font-weight:700;color:var(--ink);margin-bottom:2px">${t.name}
+        ${t.club&&t.club!=='—'?`<span class="t-club-badge">${t.club}</span>`:''}
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px">👤 ${t.p1} &amp; ${t.p2}</div>
+      ${rows.length?`<table style="width:100%;border-collapse:collapse;font-size:11px">
+        <thead><tr style="border-bottom:1px solid var(--bdr)">
+          <th style="text-align:left;padding:2px 4px;color:var(--dim);font-size:9px;font-weight:700">Vague</th>
+          <th style="text-align:left;padding:2px 4px;color:var(--dim);font-size:9px;font-weight:700">Heure</th>
+          <th style="text-align:left;padding:2px 4px;color:var(--dim);font-size:9px;font-weight:700">Terrain</th>
+          <th style="text-align:left;padding:2px 4px;color:var(--dim);font-size:9px;font-weight:700">Adversaire</th>
+          <th style="text-align:center;padding:2px 4px;color:var(--dim);font-size:9px;font-weight:700">Score</th>
+        </tr></thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>`:'<div style="color:var(--muted);font-size:11px">Planning non généré</div>'}
+      <div style="font-size:10px;color:var(--dim);margin-top:8px;text-align:right">🖨 Cliquer pour imprimer</div>
     </div>`;
   }).join('');
 }
-
-window.toggleSpecDetail = function(id){
-  const detail = document.getElementById('specdetail_'+id);
-  const row    = document.getElementById('specrow_'+id);
-  const chev   = document.getElementById('specchev_'+id);
-  if(!detail) return;
-  const isOpen = detail.style.display !== 'none';
-  ST.teams.forEach(t=>{
-    const d = document.getElementById('specdetail_'+t.id);
-    const r = document.getElementById('specrow_'+t.id);
-    const c = document.getElementById('specchev_'+t.id);
-    if(d && t.id !== id){ d.style.display='none'; if(r) r.style.borderRadius='8px'; if(c) c.textContent='▶'; }
-  });
-  if(isOpen){
-    detail.style.display='none';
-    row.style.borderRadius='8px';
-    chev.textContent='▶';
-  } else {
-    detail.style.display='block';
-    row.style.borderRadius='8px 8px 0 0';
-    chev.textContent='▼';
-  }
-};
 
 // ══════════════════════════════════════════════════════════
 // UTILITAIRE TEMPS
@@ -2190,6 +2189,7 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
   <div class="login-box">
     <div class="login-brand">🏓 Interclub</div>
     <div class="login-sub">Pickleball · Gestion de Tournoi</div>
+    <div style="text-align:center;font-size:10px;color:var(--dim);margin-bottom:14px;letter-spacing:1px">build v5.2 — répartition équitable</div>
     <div id="authMsg" style="text-align:center;font-size:13px;min-height:18px;margin-bottom:16px;color:var(--red)"></div>
 
     <!-- ══ ZONE SPECTATEURS ══ -->
@@ -2370,25 +2370,38 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
   </div>
 
   <div class="card">
-    <div class="card-ttl">👥 Équipes &amp; matchs</div>
+    <div class="card-ttl">🏟️ Structure générale</div>
     <div class="fg">
       <div class="fr">
         <div>
-          <label>Nombre d'équipes</label>
-          <input type="number" id="cfg_n" value="16" min="2" max="200" oninput="onCfgChange()">
+          <label>Nombre d'équipes total</label>
+          <select id="cfg_n" onchange="onCfgChange()">
+            <option value="2">2 équipes</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option><option value="9">9</option><option value="10">10</option><option value="11">11</option><option value="12">12</option><option value="13">13</option><option value="14">14</option><option value="15">15</option><option value="16">16</option><option value="17">17</option><option value="18">18</option><option value="19">19</option><option value="20">20</option><option value="21">21</option><option value="22">22</option><option value="23">23</option><option value="24">24</option><option value="25">25</option><option value="26">26</option><option value="27">27</option><option value="28">28</option><option value="29">29</option><option value="30">30</option><option value="31">31</option><option value="32" selected>32</option><option value="33">33</option><option value="34">34</option><option value="35">35</option><option value="36">36</option><option value="37">37</option><option value="38">38</option><option value="39">39</option><option value="40">40</option><option value="41">41</option><option value="42">42</option><option value="43">43</option><option value="44">44</option><option value="45">45</option><option value="46">46</option><option value="47">47</option><option value="48">48</option><option value="49">49</option><option value="50">50 équipes</option>
+          </select>
         </div>
         <div>
-          <label>Matchs souhaités par équipe</label>
-          <input type="number" id="cfg_matches_per_team" value="5" min="1" max="30" oninput="onCfgChange()">
+          <label>Durée d'un match (min)</label>
+          <input type="number" id="cfg_mt" value="15" min="5" max="60" step="5" onchange="onCfgChange()">
+        </div>
+        <div>
+          <label>Transition entre matchs (min)</label>
+          <input type="number" id="cfg_tt" value="3" min="0" max="30" onchange="onCfgChange()">
         </div>
       </div>
     </div>
   </div>
 
+  <!-- ══ VAGUES (config unique) ══ -->
   <div class="card" style="margin-top:14px">
-    <div class="card-ttl">🏟️ Terrains disponibles</div>
+    <div class="card-ttl">🌊 Configuration des vagues</div>
     <div class="fg">
+
+      <!-- Terrains -->
       <div class="fr">
+        <div>
+          <label>Heure de début matin</label>
+          <input type="time" id="cfg_start" value="09:00" oninput="onCfgChange()">
+        </div>
         <div>
           <label>Salles</label>
           <select id="cfg_halls" oninput="onCfgChange()">
@@ -2398,53 +2411,68 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
         </div>
         <div>
           <label>Terrains salle 1</label>
-          <input type="number" id="cfg_t1" value="8" min="1" max="50" oninput="onCfgChange()">
+          <input type="number" id="cfg_t1" value="8" min="1" max="30" oninput="onCfgChange()">
         </div>
         <div id="cfg_t2_row" style="display:none">
           <label>Terrains salle 2</label>
-          <input type="number" id="cfg_t2" value="8" min="1" max="50" oninput="onCfgChange()">
+          <input type="number" id="cfg_t2" value="8" min="1" max="30" oninput="onCfgChange()">
         </div>
       </div>
-    </div>
-    <div id="wave_auto_info" class="info info-g" style="margin-top:12px;font-size:12px"></div>
-  </div>
 
-  <div class="card" style="margin-top:14px">
-    <div class="card-ttl">⏱️ Horaires</div>
-    <div class="fg">
-      <div class="fr">
+      <!-- Répartition vagues -->
+      <div class="fr" style="margin-top:10px">
         <div>
-          <label>Heure de début</label>
-          <input type="time" id="cfg_start" value="09:00" oninput="onCfgChange()">
+          <label>Répartition des vagues</label>
+          <select id="cfg_wave_mode" oninput="onCfgChange()">
+            <option value="auto" selected>🤖 Auto (calculé)</option>
+            <option value="manual">✏️ Manuel</option>
+          </select>
         </div>
-        <div>
-          <label>Durée d'un match (min)</label>
-          <input type="number" id="cfg_mt" value="15" min="5" max="60" step="5" oninput="onCfgChange()">
+        <div id="cfg_mpt_row">
+          <label>Matchs par équipe</label>
+          <input type="number" id="cfg_matches_per_team" value="5" min="1" max="20" oninput="onCfgChange()">
         </div>
-        <div>
-          <label>Transition entre matchs (min)</label>
-          <input type="number" id="cfg_tt" value="3" min="0" max="30" oninput="onCfgChange()">
+        <div id="cfg_morning_row" style="display:none">
+          <label>Vagues matin</label>
+          <input type="number" id="cfg_morning" value="3" min="1" max="20" oninput="onCfgChange()">
         </div>
-      </div>
-      <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--s2);border-radius:8px;border:1px solid var(--bdr)">
-        <input type="checkbox" id="cfg_lunch" checked oninput="onCfgChange()" style="width:18px;height:18px;cursor:pointer">
-        <label for="cfg_lunch" style="margin:0;text-transform:none;font-size:14px;cursor:pointer;letter-spacing:0;color:var(--ink)">🍽️ Coupure déjeuner</label>
-      </div>
-      <div class="fr" id="lunchRow">
-        <div>
-          <label>Début du déjeuner</label>
-          <input type="time" id="cfg_lunchstart" value="12:30" oninput="onCfgChange()">
-        </div>
-        <div>
-          <label>Durée déjeuner (min)</label>
-          <input type="number" id="cfg_lunchdur" value="60" min="15" max="180" step="15" oninput="onCfgChange()">
+        <div id="cfg_afternoon_row" style="display:none">
+          <label>Vagues après-midi</label>
+          <input type="number" id="cfg_afternoon" value="4" min="1" max="20" oninput="onCfgChange()">
         </div>
       </div>
+
+      <!-- Preview auto vagues -->
+      <div id="wave_auto_info" class="info info-b" style="margin-top:10px;font-size:12px"></div>
+
     </div>
   </div>
 
+  <!-- ══ COUPURE DÉJEUNER ══ -->
   <div class="card" style="margin-top:14px">
-    <div class="card-ttl">⚖️ Appariement</div>
+    <div class="card-ttl" style="margin-bottom:10px">🍽️ Coupure déjeuner</div>
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--s2);border-radius:8px;border:1px solid var(--bdr);margin-bottom:10px">
+      <input type="checkbox" id="cfg_lunch" checked oninput="onCfgChange()" style="width:18px;height:18px;cursor:pointer">
+      <label for="cfg_lunch" style="margin:0;text-transform:none;font-size:14px;cursor:pointer;letter-spacing:0;color:var(--ink)">Activer la coupure déjeuner</label>
+    </div>
+    <div class="fr" id="lunchRow">
+      <div>
+        <label>Début du déjeuner</label>
+        <input type="time" id="cfg_lunchstart" value="12:30" oninput="onCfgChange()">
+      </div>
+      <div>
+        <label>Durée déjeuner (min)</label>
+        <input type="number" id="cfg_lunchdur" value="60" min="15" max="180" step="15" oninput="onCfgChange()">
+      </div>
+    </div>
+  </div>
+
+  <!-- div vides gardés pour compatibilité buildSchedule -->
+  <div id="morning_waves_config" style="display:none"></div>
+  <div id="afternoon_waves_config" style="display:none"></div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="card-ttl">⚖️ Algorithme d'appariement</div>
     <div>
       <label>Mode d'équilibrage</label>
       <select id="cfg_bal" onchange="onCfgChange()">
@@ -2453,11 +2481,11 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
       </select>
     </div>
     <div class="info info-b" style="margin-top:12px;font-size:12px">
-      ℹ️ L'algorithme <strong>évite les confrontations entre équipes du même club</strong> et <strong>minimise les répétitions d'adversaires</strong>.
+      ℹ️ L'algorithme <strong>évite les confrontations entre équipes du même club</strong> et <strong>minimise les répétitions d'adversaires</strong>. Chaque équipe peut changer de salle entre le matin et l'après-midi.
     </div>
   </div>
 
-  <div id="cfgPreview" class="info info-g" style="margin-top:14px"></div>
+  <div id="cfgPreview" class="info info-g" style="margin-top:14px">Configurez les paramètres ci-dessus.</div>
 
   <div class="flex g8 fw mt16">
     <button class="btn btn-g" onclick="saveCfgAndNext()">Valider la config →</button>
@@ -2832,13 +2860,6 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
 <style>
 /* ── NUMPAD ──────────────────────────────────────────── */
 #numpadOverlay.open{ display:flex !important; }
-.fiche-team-row{
-  display:flex;align-items:center;gap:8px;
-  background:var(--s2);border:1px solid var(--bdr);border-radius:8px;
-  padding:10px 14px;cursor:pointer;margin-bottom:2px;
-  transition:background .15s;user-select:none;-webkit-tap-highlight-color:transparent;
-}
-.fiche-team-row:hover,.fiche-team-row:active{ background:var(--s3); }
 .numpad-key{
   background:var(--s2);border:1.5px solid var(--bdr2);border-radius:12px;
   color:var(--ink);font-family:'Oswald',sans-serif;font-size:24px;font-weight:600;
