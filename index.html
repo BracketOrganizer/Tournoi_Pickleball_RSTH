@@ -641,60 +641,60 @@ function buildSchedule(){
     const halls = cfg.halls || wave.halls || 1;
     const t1    = cfg.t1    || wave.t1    || 8;
     const t2    = cfg.t2    || wave.t2    || 8;
-    let grp1=[], grp2=[];
+    const totalCourts = halls===2 ? t1+t2 : t1;
+
+    // ── SÉLECTION GLOBALE DES EXEMPTS ──────────────────────
+    // On calcule d'abord combien d'équipes jouent AU TOTAL cette vague,
+    // puis on choisit qui est exempt en regardant TOUTES les équipes ensemble.
+    // C'est la seule façon de garantir un écart max de 1 match entre équipes.
+    const maxMatchesTotal = Math.min(Math.floor(N/2), totalCourts);
+    const numPlaying = maxMatchesTotal * 2;
+    const numRest = N - numPlaying;
+
+    // Trier globalement : au repos → ceux qui ont le plus joué (équilibrage)
+    // En cas d'égalité de matchs joués : ceux qui ont le moins été exemptés
+    // En cas d'égalité parfaite : aléatoire
+    const sortedAll = shuffle([...allIds]).sort((a,b)=>
+      (playCount[b]-playCount[a]) ||
+      ((byeCount[a]||0)-(byeCount[b]||0))
+    );
+    const restIds = sortedAll.slice(0, numRest);
+    const restSet = new Set(restIds);
+    restIds.forEach(id=>{ byeCount[id]=(byeCount[id]||0)+1; });
+    const activeIds = allIds.filter(id=>!restSet.has(id));
+
+    // ── DISTRIBUTION DES ACTIFS ENTRE SALLES ───────────────
+    // On mélange les actifs (déjà équilibrés par playCount) puis on remplit
+    // la salle 1 jusqu'à sa capacité, le reste va en salle 2.
+    let playing1=[], playing2=[], byes1=[], byes2=[];
     if(halls===1){
-      grp1=[...allIds]; grp2=[];
+      playing1 = shuffle([...activeIds]);
+      byes1 = restIds;
     } else {
-      // Équilibrage : prioriser les équipes qui ont le moins joué pour remplir les terrains
-      const target1=Math.ceil(N/2);
-      // Trier par playCount croissant + byeCount décroissant pour forcer l'équité inter-salles
-      const sorted=[...allIds].sort((a,b)=>
-        ((playCount[a]||0)-(playCount[b]||0))||((byeCount[b]||0)-(byeCount[a]||0))||(Math.random()-.5)
-      );
-      // Alterner entre les deux salles pour que chaque équipe soit exposée aux deux
-      grp1=[]; grp2=[];
-      sorted.forEach((id,i)=>{ if(i%2===0) grp1.push(id); else grp2.push(id); });
-    }
-    // Sélection équitable des équipes au repos : on retire autant d'équipes
-    // que nécessaire pour que le reste forme un nombre pair <= terrains*2,
-    // en priorisant celles qui ont le moins joué / le moins été au repos.
-    function pickRestAndActive(grp, maxCourts){
-      const maxMatches=Math.min(Math.floor(grp.length/2), maxCourts);
-      const numRest=grp.length - maxMatches*2;
-      let rest=[], active=[...grp];
-      if(numRest>0){
-        // Mettre au repos en priorité ceux qui ont le PLUS joué (pour équilibrer)
-        // En cas d'égalité, prioriser ceux qui ont le moins été exemptés
-        const sorted=[...grp].sort((a,b)=>
-          (playCount[b]-playCount[a]) ||
-          ((byeCount[a]||0)-(byeCount[b]||0)) ||
-          (Math.random()-.5)
-        );
-        rest=sorted.slice(0,numRest);
-        const restSet=new Set(rest);
-        active=grp.filter(id=>!restSet.has(id));
-        rest.forEach(id=>{ byeCount[id]=(byeCount[id]||0)+1; });
-      }
-      return {active, rest, maxMatches};
+      const cap1 = t1 * 2;
+      // Mélanger les actifs pour varier les rencontres inter-salles
+      const shuffledActive = shuffle([...activeIds]);
+      playing1 = shuffledActive.slice(0, cap1);
+      playing2 = shuffledActive.slice(cap1);
+      // Distribuer les exempts entre les salles pour l'affichage
+      byes1 = restIds.slice(0, Math.ceil(restIds.length/2));
+      byes2 = restIds.slice(Math.ceil(restIds.length/2));
     }
 
-    const r1=pickRestAndActive(grp1,t1);
-    const matches1=makeRoundMatches(r1.active,r1.maxMatches,oppCount);
+    const matches1 = makeRoundMatches(playing1, t1, oppCount);
     matches1.forEach(m=>{ [m.tA,m.tB].forEach(id=>{ playCount[id]=(playCount[id]||0)+1; if(!oppCount[id]) oppCount[id]={}; const o=m.tA===id?m.tB:m.tA; oppCount[id][o]=(oppCount[id][o]||0)+1; }); });
+
     let hall2=null;
-    let restsAll=[...r1.rest];
-    if(halls===2&&grp2.length>=2){
-      const r2=pickRestAndActive(grp2,t2);
-      const matches2=makeRoundMatches(r2.active,r2.maxMatches,oppCount);
+    if(halls===2 && playing2.length>=2){
+      const matches2 = makeRoundMatches(playing2, t2, oppCount);
       matches2.forEach(m=>{ [m.tA,m.tB].forEach(id=>{ playCount[id]=(playCount[id]||0)+1; if(!oppCount[id]) oppCount[id]={}; const o=m.tA===id?m.tB:m.tA; oppCount[id][o]=(oppCount[id][o]||0)+1; }); });
-      hall2={ matches:matches2, byes:r2.rest, label:'Salle 2', teams:grp2 };
-      restsAll=[...restsAll, ...r2.rest];
+      hall2={ matches:matches2, byes:byes2, label:'Salle 2', teams:playing2 };
     }
     schedule.push({
       roundTime:matchTime, session:wave.session, posInSession:wave.idx,
       waveLabel:`${isAM?'🌤️':'☀️'} Vague ${wave.idx+1}`,
-      hall1:{ matches:matches1, byes:r1.rest, label:halls===2?'Salle 1':'', teams:grp1 },
-      hall2, subs:restsAll
+      hall1:{ matches:matches1, byes:byes1, label:halls===2?'Salle 1':'', teams:playing1 },
+      hall2, subs:restIds
     });
   }
   ST.schedule=schedule; ST.results={}; ST.activeRound=0;
