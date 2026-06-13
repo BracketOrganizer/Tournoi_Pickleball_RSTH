@@ -575,7 +575,7 @@ window.onCfgChange = function(){
   const el = document.getElementById('cfgPreview');
   if(el){
     el.className='info info-g';
-    el.innerHTML=`<strong>${n} équipes</strong> · <strong>${morning+afternoon} vagues</strong> (${morning} matin + ${afternoon} AM)<br>
+    el.innerHTML=`<strong>${n} équipes</strong> · <strong>${morning+afternoon} vagues</strong> (${morning} matin + ${afternoon} après-midi)<br>
     ☀️ ${start} → ${morningEnd}${lunchCk?` · 🍽️ ${lunchStart} (${lunchDur} min)`:''}<br>
     🌤️ ${afterStart} → ${afterEnd} · ⏱ match ${mt} min · transition ${tt} min`;
   }
@@ -633,29 +633,36 @@ function buildSchedule(){
   const afternoonStart=cfg.lunchBreak
     ? addMinutes(cfg.lunchStart,cfg.lunchDuration||60)
     : addMinutes(morningStart,cfg.matchesMorning*(cfg.mt+cfg.tt));
-  const schedule=[];
-  for(const wave of cfg.waves){
-    const isAM=wave.session==='afternoon';
-    const sessStart=isAM?afternoonStart:morningStart;
-    const matchTime=addMinutes(sessStart,wave.idx*(cfg.mt+cfg.tt));
-    // Config terrains unifiée
-    const halls = cfg.halls || wave.halls || 1;
-    const t1    = cfg.t1    || wave.t1    || 8;
-    const t2    = cfg.t2    || wave.t2    || 8;
-    let grp1=[], grp2=[];
-    if(halls===1){
-      grp1=[...allIds]; grp2=[];
-    } else {
-      const target1=Math.ceil(N/2);
-      const shuffled=shuffle(allIds);
-      grp1=shuffled.slice(0,target1);
-      grp2=shuffled.slice(target1);
-    }
-    // Sélection équitable des équipes au repos : seulement si nombre d'équipes impair
-    // (1 seul exempt max par vague). Le nombre de terrains ne limite PAS les matchs —
-    // toutes les équipes jouent à chaque vague, sauf si N est impair.
-    function pickRestAndActive(grp, maxCourts){
-      // Nombre d'exempts = 0 si pair, 1 si impair
+
+  const halls = cfg.halls || 1;
+  const t1    = cfg.t1    || 8;
+  const t2    = cfg.t2    || 8;
+
+  // ── Groupes FIXES par salle pour toute la journée ─────────────
+  // On assigne équitablement les équipes à chaque salle une fois pour toutes.
+  // Avec 2 salles : salle1 ≈ N/2 équipes, salle2 ≈ N/2 équipes (+ 1 si N impair).
+  // L'exempt global (si N total impair) est désigné par rotation à chaque vague.
+  let hallGroups; // tableau de tableaux d'ids par salle
+  if(halls===1){
+    hallGroups=[shuffle(allIds)];
+  } else {
+    // On répartit équitablement : salle1 = ceil(N/2), salle2 = floor(N/2)
+    const shuffled=shuffle(allIds);
+    const n1=Math.ceil(N/2);
+    hallGroups=[shuffled.slice(0,n1), shuffled.slice(n1)];
+  }
+
+  // Sélection des équipes actives dans une salle pour une vague.
+  // Principe : terrains T → T matchs → 2T équipes jouent.
+  // Les autres équipes de cette salle sont "en attente" (pas exemptées, elles jouent juste
+  // une autre vague). Une équipe est EXEMPTÉE (2pts, 0-0) UNIQUEMENT si N global est impair
+  // et qu'on lui attribue le tour de repos. Ici on gère l'exempt au niveau salle.
+  function pickActive(grp, maxCourts){
+    // Exactement maxCourts matchs = 2*maxCourts équipes actives.
+    // Si grp.length <= 2*maxCourts : tout le groupe joue (0 ou 1 exempt si impair).
+    const slots = maxCourts * 2;
+    if(grp.length <= slots){
+      // Tout le groupe dans cette vague — exempt seulement si impair
       const numRest = grp.length % 2;
       let rest=[], active=[...grp];
       if(numRest>0){
@@ -664,32 +671,86 @@ function buildSchedule(){
           (playCount[b]-playCount[a]) ||
           (Math.random()-.5)
         );
-        rest=sorted.slice(0,numRest);
+        rest=sorted.slice(0,1);
         const restSet=new Set(rest);
         active=grp.filter(id=>!restSet.has(id));
-        rest.forEach(id=>{ byeCount[id]=(byeCount[id]||0)+1; });
       }
-      const maxMatches=Math.floor(active.length/2);
-      return {active, rest, maxMatches};
+      return {active, waiting:[], bye: rest[0]||null};
     }
+    // Plus d'équipes que de terrains : choisir les 2*maxCourts qui ont le moins joué
+    // (équité de rotation), en évitant de rejouer avec les mêmes adversaires.
+    const sorted=[...grp].sort((a,b)=>
+      (playCount[a]-playCount[b]) ||       // moins joué en premier
+      ((byeCount[b]||0)-(byeCount[a]||0)) || // plus souvent exempt passe en dernier
+      (Math.random()-.5)
+    );
+    const active=sorted.slice(0,slots);
+    const waiting=sorted.slice(slots);
+    return {active, waiting, bye:null};
+  }
 
-    const r1=pickRestAndActive(grp1,t1);
-    const matches1=makeRoundMatches(r1.active,r1.maxMatches,oppCount);
-    matches1.forEach(m=>{ [m.tA,m.tB].forEach(id=>{ playCount[id]=(playCount[id]||0)+1; if(!oppCount[id]) oppCount[id]={}; const o=m.tA===id?m.tB:m.tA; oppCount[id][o]=(oppCount[id][o]||0)+1; }); });
-    let hall2=null;
-    let restsAll=[...r1.rest];
-    if(halls===2&&grp2.length>=2){
-      const r2=pickRestAndActive(grp2,t2);
-      const matches2=makeRoundMatches(r2.active,r2.maxMatches,oppCount);
-      matches2.forEach(m=>{ [m.tA,m.tB].forEach(id=>{ playCount[id]=(playCount[id]||0)+1; if(!oppCount[id]) oppCount[id]={}; const o=m.tA===id?m.tB:m.tA; oppCount[id][o]=(oppCount[id][o]||0)+1; }); });
-      hall2={ matches:matches2, byes:r2.rest, label:'Salle 2', teams:grp2 };
-      restsAll=[...restsAll, ...r2.rest];
-    }
+  // Sélection de l'exempt global (si N impair) : l'équipe qui a été le moins souvent exemptée
+  // parmi celles qui sont déjà "en attente" cette vague, sinon parmi toutes.
+  function pickGlobalBye(waitingAll){
+    if(N%2===0) return null; // N pair → jamais d'exempt
+    if(waitingAll.length===0) return null;
+    const sorted=[...waitingAll].sort((a,b)=>
+      ((byeCount[a]||0)-(byeCount[b]||0)) || (Math.random()-.5)
+    );
+    const chosen=sorted[0];
+    byeCount[chosen]=(byeCount[chosen]||0)+1;
+    return chosen;
+  }
+
+  const schedule=[];
+  for(const wave of cfg.waves){
+    const isAfternoon=wave.session==='afternoon';
+    const sessStart=isAfternoon?afternoonStart:morningStart;
+    const matchTime=addMinutes(sessStart,wave.idx*(cfg.mt+cfg.tt));
+
+    const hallResults=hallGroups.map((grp,hi)=>{
+      const maxCourts=hi===0?t1:t2;
+      return pickActive(grp, maxCourts);
+    });
+
+    // Collecter toutes les équipes "en attente" pour l'exempt global si besoin
+    const allWaiting=hallResults.flatMap(r=>r.waiting);
+    const globalBye=pickGlobalBye(allWaiting);
+
+    // Générer les matchs pour chaque salle
+    const hallData=hallResults.map((hr,hi)=>{
+      const maxCourts=hi===0?t1:t2;
+      // Si une équipe "en attente" est choisie comme bye global, la retirer des waiting
+      const byes=hr.bye?[hr.bye]:[];
+      const matches=makeRoundMatches(hr.active, maxCourts, oppCount);
+      matches.forEach(m=>{ [m.tA,m.tB].forEach(id=>{
+        playCount[id]=(playCount[id]||0)+1;
+        if(!oppCount[id]) oppCount[id]={};
+        const o=m.tA===id?m.tB:m.tA;
+        oppCount[id][o]=(oppCount[id][o]||0)+1;
+      }); });
+      return {
+        matches,
+        byes,
+        waiting:hr.waiting,
+        label: halls===2?(hi===0?'Salle 1':'Salle 2'):'',
+        teams: hallGroups[hi]
+      };
+    });
+
+    // L'exempt global va sur la salle où il était en attente, sinon salle 1
+    const subsAll=[...hallData.flatMap(h=>h.byes)];
+    if(globalBye) subsAll.push(globalBye);
+
+    const waveNum=schedule.length+1;
     schedule.push({
-      roundTime:matchTime, session:wave.session, posInSession:wave.idx,
-      waveLabel:`${isAM?'🌤️':'☀️'} Vague ${wave.idx+1}`,
-      hall1:{ matches:matches1, byes:r1.rest, label:halls===2?'Salle 1':'', teams:grp1 },
-      hall2, subs:restsAll
+      roundTime:matchTime,
+      session:wave.session,
+      posInSession:wave.idx,
+      waveLabel:`${isAfternoon?'🌤️':'☀️'} Vague ${waveNum}`,
+      hall1:{ matches:hallData[0].matches, byes:hallData[0].byes, waiting:hallData[0].waiting, label:hallData[0].label, teams:hallData[0].teams },
+      hall2: halls===2&&hallData[1] ? { matches:hallData[1].matches, byes:hallData[1].byes, waiting:hallData[1].waiting, label:hallData[1].label, teams:hallData[1].teams } : null,
+      subs: subsAll
     });
   }
   ST.schedule=schedule; ST.results={}; ST.activeRound=0;
@@ -1715,7 +1776,7 @@ window.printTeamSchedule = function(tid){
   const rows=[];
   ST.schedule.forEach((rd,r)=>{
     const halls=[rd.hall1,rd.hall2].filter(Boolean);
-    const session=rd.session==='morning'?'☀️ Matin':'🌤️ AM';
+    const session=rd.session==='morning'?'☀️ Matin':'🌤️ Après-midi';
     halls.forEach((h,hi)=>{
       if((h.byes||[]).includes(tid)){
         rows.push({r,time:rd.roundTime||'',session,waveLabel:rd.waveLabel||('Vague '+(r+1)),type:'bye',court:'—',opp:null});
